@@ -1,36 +1,33 @@
-import time
 import os
 import sys
+import time
 import json
-import base64
 import asyncio
 import feedparser
 import requests
 import edge_tts
+import xmlrpc.client
 from pydub import AudioSegment
 
 # ==============================================================================
-# CONFIGURAÇÕES (Secrets do Repositório)
+# CONFIGURAÇÕES
 # ==============================================================================
 WP_URL = os.environ.get("WP_URL", "").rstrip("/")
 WP_USER = os.environ.get("WP_USER", "")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-VOICE_A = "pt-BR-AntonioNeural"    # Apresentador 1
-VOICE_B = "pt-BR-FranciscaNeural"  # Apresentadora 2
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
+GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main")
+
+VOICE_A = "pt-BR-AntonioNeural"    # Alex
+VOICE_B = "pt-BR-FranciscaNeural"  # Bia
 
 RSS_FEED_URL = "https://news.google.com/rss/search?q=inteligencia+artificial+when:1d&hl=pt-BR&gl=BR&ceid=BR:pt-419"
 
 
-def get_wp_auth_header():
-    credenciais = f"{WP_USER}:{WP_APP_PASSWORD}"
-    token = base64.b64encode(credenciais.encode()).decode("utf-8")
-    return {"Authorization": f"Basic {token}"}
-
-
 # ==============================================================================
-# 1. BUSCA DE NOTÍCIAS E VERIFICAÇÃO DE DUPLICIDADE
+# 1. BUSCA DE NOTÍCIAS E VERIFICAÇÃO VIA RSS DO BLOG
 # ==============================================================================
 def obter_noticia_inedita():
     feed = feedparser.parse(RSS_FEED_URL)
@@ -40,11 +37,12 @@ def obter_noticia_inedita():
 
     titulos_recentes = []
     try:
-        resp = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?per_page=10", headers=get_wp_auth_header(), timeout=15)
-        if resp.status_code == 200:
-            titulos_recentes = [p["title"]["rendered"].lower() for p in resp.json()]
+        # Lê o feed público do seu próprio blog no WordPress.com
+        blog_feed = feedparser.parse(f"{WP_URL}/feed/")
+        if blog_feed.entries:
+            titulos_recentes = [e.title.lower() for e in blog_feed.entries[:10]]
     except Exception as e:
-        print(f"Aviso ao consultar posts recentes: {e}")
+        print(f"Aviso ao consultar feed do blog: {e}")
 
     for entry in feed.entries[:8]:
         titulo_limpo = entry.title.split(" - ")[0].strip()
@@ -55,15 +53,15 @@ def obter_noticia_inedita():
                 "resumo_fonte": entry.summary if hasattr(entry, "summary") else titulo_limpo
             }
 
-    print("Todas as notícias recentes do feed já foram publicadas.")
+    print("Todas as notícias recentes já foram publicadas no blog.")
     return None
 
 
 # ==============================================================================
-# 2. GERAÇÃO DO ROTEIRO (Com Retry e Fallback para Resiliência a 503)
+# 2. GERAÇÃO DO ROTEIRO (Com Retry e Fallback para 503)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
-  prompt = f"""
+    prompt = f"""
     Você é o roteirista de um mini podcast diário de 1 minuto sobre Inteligência Artificial chamado "Drops IA".
     Crie um bate-papo dinâmico e natural entre dois apresentadores: Alex e Bia.
 
@@ -85,55 +83,47 @@ def gerar_roteiro(noticia: dict) -> dict:
     }}
     """
 
-  headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
-  payload = {
-      "contents": [{"parts": [{"text": prompt}]}],
-      "generationConfig": {"response_mime_type": "application/json"},
-  }
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json"}
+    }
 
-  # Lista de modelos por ordem de preferência
-  modelos_fallback = [
-      "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-3.5-flash-lite",
-  ]
+    modelos_fallback = [
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite"
+    ]
 
-  for modelo in modelos_fallback:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
+    for modelo in modelos_fallback:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
+        for tentativa in range(1, 4):
+            print(f"Tentativa {tentativa} usando modelo: {modelo}...")
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=35)
+                if resp.status_code == 200:
+                    raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    return json.loads(raw_json)
+                if resp.status_code in (503, 429):
+                    print(f"Modelo {modelo} com pico de demanda (HTTP {resp.status_code}). Aguardando 5s...")
+                    time.sleep(5)
+                else:
+                    print(f"Aviso ({resp.status_code}) em {modelo}: {resp.text}")
+                    break
+            except Exception as e:
+                print(f"Falha de conexão com {modelo}: {e}")
+                time.sleep(3)
 
-    for tentativa in range(1, 4):
-      print(f"Tentativa {tentativa} usando modelo: {modelo}...")
-      try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=35)
+    raise RuntimeError("Todos os modelos do Gemini falharam ou estão em alta demanda.")
 
-        if resp.status_code == 200:
-          raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-          return json.loads(raw_json)
-
-        # Se for sobrecarga temporária (503 ou 429), aguarda 5 segundos e tenta de novo
-        if resp.status_code in (503, 429):
-          print(
-              f"Modelo {modelo} com pico de demanda (HTTP"
-              f" {resp.status_code}). Aguardando 5s..."
-          )
-          time.sleep(5)
-        else:
-          print(f"Aviso ({resp.status_code}) no modelo {modelo}: {resp.text}")
-          break  # Se for outro erro, tenta o próximo modelo da lista
-
-      except Exception as e:
-        print(f"Falha de conexão com {modelo}: {e}")
-        time.sleep(3)
-
-  raise RuntimeError(
-      "Não foi possível gerar o roteiro: todos os modelos do Gemini falharam"
-      " ou estão em alta demanda no momento."
-  )
 
 # ==============================================================================
 # 3. SÍNTESE DO ÁUDIO (Edge-TTS)
 # ==============================================================================
-async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
+async def sintetizar_dialogo(dialogo: list, arquivo_saida: str):
     temp_files = []
     for i, turno in enumerate(dialogo):
         temp_name = f"temp_parte_{i}.mp3"
@@ -155,62 +145,17 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
 
 
 # ==============================================================================
-# 4. PUBLICAÇÃO NO WORDPRESS (Com detecção automática de rota da REST API)
+# 4. PUBLICAÇÃO NO WORDPRESS.COM VIA XML-RPC
 # ==============================================================================
-def obter_base_api_wp():
-  """Verifica se o servidor responde em /wp-json/ ou pelo fallback ?rest_route=."""
-  headers = get_wp_auth_header()
-  url_padrao = f"{WP_URL}/wp-json/wp/v2"
+def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
+    server = xmlrpc.client.ServerProxy(f"{WP_URL}/xmlrpc.php")
 
-  try:
-    r = requests.get(f"{url_padrao}/types", headers=headers, timeout=10)
-    if r.status_code == 200:
-      return url_padrao, False  # Rota padrão com pretty permalinks
-  except Exception:
-    pass
-
-  # Fallback caso os links permanentes estejam no modo simples
-  print(
-      "Aviso: /wp-json/ retornou erro ou 404. Usando rota de contingência"
-      " ?rest_route=/wp/v2..."
-  )
-  return f"{WP_URL}/index.php?rest_route=/wp/v2", True
-
-
-def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
-  headers_auth = get_wp_auth_header()
-  api_base, is_fallback = obter_base_api_wp()
-
-  # 4.1. Upload do Arquivo de Áudio
-  endpoint_media = f"{api_base}&media" if is_fallback else f"{api_base}/media"
-  if is_fallback:
-    endpoint_media = f"{WP_URL}/index.php?rest_route=/wp/v2/media"
-
-  nome_arquivo = f"drops_ia_{os.path.basename(caminho_audio)}"
-  with open(caminho_audio, "rb") as f:
-    media_headers = {
-        **headers_auth,
-        "Content-Disposition": f'attachment; filename="{nome_arquivo}"',
-        "Content-Type": "audio/mpeg",
-    }
-    media_resp = requests.post(
-        endpoint_media, headers=media_headers, data=f, timeout=60
-    )
-    if not media_resp.ok:
-      print(f"Erro no upload da mídia ({media_resp.status_code}):")
-      print(media_resp.text)
-      media_resp.raise_for_status()
-
-    media_data = media_resp.json()
-    audio_id = media_data["id"]
-    audio_url = media_data["source_url"]
-
-  # 4.2. Estrutura de Blocos do Gutenberg para o Spearhead
-  bloco_audio = f"""<!-- wp:audio {{"id":{audio_id}}} -->
+    # Bloco nativo de áudio para o Spearhead apontando para a CDN do GitHub
+    bloco_audio = f"""<!-- wp:audio -->
 <figure class="wp-block-audio"><audio controls src="{audio_url}"></audio></figure>
 <!-- /wp:audio -->"""
 
-  bloco_texto = f"""<!-- wp:heading {{"level":3}} -->
+    bloco_texto = f"""<!-- wp:heading {{"level":3}} -->
 <h3 class="wp-block-heading">Notas do Episódio</h3>
 <!-- /wp:heading -->
 
@@ -218,31 +163,22 @@ def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
 <p>{dados_episodio['resumo_texto']}</p>
 <!-- /wp:paragraph -->"""
 
-  conteudo_post = f"{bloco_audio}\n\n{bloco_texto}"
+    conteudo_completo = f"{bloco_audio}\n\n{bloco_texto}"
 
-  post_payload = {
-      "title": f"Drops IA: {dados_episodio['titulo_episodio']}",
-      "content": conteudo_post,
-      "status": "publish",
-      "format": "audio",
-  }
+    post_data = {
+        "post_title": f"Drops IA: {dados_episodio['titulo_episodio']}",
+        "post_content": conteudo_completo,
+        "post_status": "publish",
+        "post_format": "audio",
+        "terms_names": {
+            "category": ["Podcasts", "Inteligência Artificial"]
+        }
+    }
 
-  endpoint_posts = (
-      f"{WP_URL}/index.php?rest_route=/wp/v2/posts"
-      if is_fallback
-      else f"{api_base}/posts"
-  )
-  post_headers = {**headers_auth, "Content-Type": "application/json"}
-
-  post_resp = requests.post(
-      endpoint_posts, headers=post_headers, json=post_payload, timeout=30
-  )
-  if not post_resp.ok:
-    print(f"Erro ao criar o post ({post_resp.status_code}):")
-    print(post_resp.text)
-    post_resp.raise_for_status()
-
-  return post_resp.json()
+    print("Enviando post via XML-RPC para o WordPress.com...")
+    # Chamada nativa aceita em todos os planos do WordPress.com
+    post_id = server.wp.newPost(0, WP_USER, WP_APP_PASSWORD, post_data)
+    return post_id
 
 
 # ==============================================================================
@@ -250,29 +186,35 @@ def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
 # ==============================================================================
 def main():
     if not all([WP_URL, WP_USER, WP_APP_PASSWORD, GEMINI_API_KEY]):
-        print("Erro: Verifique se todas as variáveis de ambiente foram configuradas.")
+        print("Erro: Verifique as variáveis de ambiente (WP_URL, WP_USER, WP_APP_PASSWORD, GEMINI_API_KEY).")
         sys.exit(1)
 
     print("Etapa 1: Buscando notícias...")
     noticia = obter_noticia_inedita()
     if not noticia:
-        print("Encerrando execução sem novas publicações.")
+        print("Encerrando execução.")
         return
 
     print(f"Notícia selecionada: {noticia['titulo']}")
 
-    print("Etapa 2: Gerando roteiro calibrado para 1 minuto...")
+    print("Etapa 2: Gerando roteiro...")
     dados = gerar_roteiro(noticia)
 
-    print("Etapa 3: Sintetizando vozes neurais (Alex e Bia)...")
-    asyncio.run(sintetizar_dialogo(dados["dialogo"], "episodio.mp3"))
+    print("Etapa 3: Sintetizando áudio...")
+    os.makedirs("audios", exist_ok=True)
+    nome_audio = f"episodio_{int(time.time())}.mp3"
+    caminho_audio = os.path.join("audios", nome_audio)
 
-    print("Etapa 4: Publicando no WordPress (Tema Spearhead)...")
-    post = publicar_wordpress(dados, "episodio.mp3")
-    print(f"Sucesso! Episódio publicado em: {post.get('link')}")
+    asyncio.run(sintetizar_dialogo(dados["dialogo"], caminho_audio))
+    print(f"Áudio gerado em: {caminho_audio}")
 
-    if os.path.exists("episodio.mp3"):
-        os.remove("episodio.mp3")
+    # Monta a URL pública via CDN do GitHub
+    audio_cdn_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_REF_NAME}/audios/{nome_audio}"
+    print(f"URL pública do áudio: {audio_cdn_url}")
+
+    print("Etapa 4: Publicando no WordPress.com...")
+    post_id = publicar_wordpress_com(dados, audio_cdn_url)
+    print(f"Sucesso! Post criado com ID #{post_id} no seu WordPress.com!")
 
 
 if __name__ == "__main__":
