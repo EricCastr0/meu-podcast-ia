@@ -62,7 +62,7 @@ def obter_noticia_inedita():
 # 2. GERAÇÃO DO ROTEIRO (LLM - Gemini 2.0 Flash)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
-    prompt = f"""
+  prompt = f"""
     Você é o roteirista de um mini podcast diário de 1 minuto sobre Inteligência Artificial chamado "Drops IA".
     Crie um bate-papo dinâmico e natural entre dois apresentadores: Alex e Bia.
 
@@ -84,27 +84,24 @@ def gerar_roteiro(noticia: dict) -> dict:
     }}
     """
 
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
-    
-    # Endpoint do modelo estável atual gemini-2.0-flash
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-    
-    print(f"Enviando solicitação para: {url}")
-    resp = requests.post(url, json=payload, headers=headers, timeout=30)
-    
-    if not resp.ok:
-        print(f"Erro retornado pela API do Gemini ({resp.status_code}): {resp.text}")
-        resp.raise_for_status()
+  headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+  payload = {
+      "contents": [{"parts": [{"text": prompt}]}],
+      "generationConfig": {"response_mime_type": "application/json"},
+  }
 
-    raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(raw_json)
+  # Endpoint com o modelo oficial atual
+  url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+
+  print(f"Enviando solicitação para: {url}")
+  resp = requests.post(url, json=payload, headers=headers, timeout=30)
+
+  if not resp.ok:
+    print(f"Erro retornado pela API do Gemini ({resp.status_code}): {resp.text}")
+    resp.raise_for_status()
+
+  raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+  return json.loads(raw_json)
 
 
 # ==============================================================================
