@@ -9,14 +9,13 @@ import edge_tts
 from pydub import AudioSegment
 
 # ==============================================================================
-# CONFIGURAÇÕES (Variáveis de Ambiente / Secrets)
+# CONFIGURAÇÕES (Secrets do Repositório)
 # ==============================================================================
 WP_URL = os.environ.get("WP_URL", "").rstrip("/")
 WP_USER = os.environ.get("WP_USER", "")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Configuração de Vozes Edge-TTS (Português do Brasil)
 VOICE_A = "pt-BR-AntonioNeural"    # Apresentador 1
 VOICE_B = "pt-BR-FranciscaNeural"  # Apresentadora 2
 
@@ -33,13 +32,11 @@ def get_wp_auth_header():
 # 1. BUSCA DE NOTÍCIAS E VERIFICAÇÃO DE DUPLICIDADE
 # ==============================================================================
 def obter_noticia_inedita():
-    """Busca notícia do RSS e evita republicar títulos já postados recentemente."""
     feed = feedparser.parse(RSS_FEED_URL)
     if not feed.entries:
         print("Nenhuma notícia encontrada no feed RSS.")
         return None
 
-    # Consulta os últimos 10 posts do WordPress para comparar títulos
     titulos_recentes = []
     try:
         resp = requests.get(f"{WP_URL}/wp-json/wp/v2/posts?per_page=10", headers=get_wp_auth_header(), timeout=15)
@@ -50,7 +47,6 @@ def obter_noticia_inedita():
 
     for entry in feed.entries[:8]:
         titulo_limpo = entry.title.split(" - ")[0].strip()
-        # Evita duplicatas simples
         if not any(titulo_limpo.lower() in t for t in titulos_recentes):
             return {
                 "titulo": titulo_limpo,
@@ -63,10 +59,10 @@ def obter_noticia_inedita():
 
 
 # ==============================================================================
-# 2. GERAÇÃO DO ROTEIRO (LLM - Roteiro de 1 min / 130-145 palavras)
+# 2. GERAÇÃO DO ROTEIRO (LLM - Gemini 2.0 Flash)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
-  prompt = f"""
+    prompt = f"""
     Você é o roteirista de um mini podcast diário de 1 minuto sobre Inteligência Artificial chamado "Drops IA".
     Crie um bate-papo dinâmico e natural entre dois apresentadores: Alex e Bia.
 
@@ -88,22 +84,31 @@ def gerar_roteiro(noticia: dict) -> dict:
     }}
     """
 
-  headers = {"Content-Type": "application/json"}
-  payload = {
-      "contents": [{"parts": [{"text": prompt}]}],
-      "generationConfig": {"response_mime_type": "application/json"},
-  }
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json"}
+    }
+    
+    # Endpoint do modelo estável atual gemini-2.0-flash
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    
+    print(f"Enviando solicitação para: {url}")
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    
+    if not resp.ok:
+        print(f"Erro retornado pela API do Gemini ({resp.status_code}): {resp.text}")
+        resp.raise_for_status()
 
-  # Endpoint com o modelo oficial gemini-1.5-flash
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return json.loads(raw_json)
 
-  resp = requests.post(url, json=payload, headers=headers, timeout=30)
-  resp.raise_for_status()
-  raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-  return json.loads(raw_json)
 
 # ==============================================================================
-# 3. SÍNTESE DO ÁUDIO (Edge-TTS + Concatenação Pydub)
+# 3. SÍNTESE DO ÁUDIO (Edge-TTS)
 # ==============================================================================
 async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
     temp_files = []
@@ -115,7 +120,7 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
         temp_files.append(temp_name)
 
     audio_final = AudioSegment.empty()
-    pausa = AudioSegment.silent(duration=200)  # 200ms de respiro entre falas
+    pausa = AudioSegment.silent(duration=200)
 
     for f in temp_files:
         audio_final += AudioSegment.from_file(f) + pausa
@@ -127,7 +132,7 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
 
 
 # ==============================================================================
-# 4. PUBLICAÇÃO NO WORDPRESS (Compatível com Tema Spearhead)
+# 4. PUBLICAÇÃO NO WORDPRESS (Tema Spearhead)
 # ==============================================================================
 def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
     headers_auth = get_wp_auth_header()
@@ -151,7 +156,7 @@ def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
         audio_id = media_data["id"]
         audio_url = media_data["source_url"]
 
-    # 4.2. Estruturação do Conteúdo com o Bloco Nativo de Áudio do Gutenberg
+    # 4.2. Estrutura de Blocos do Gutenberg para o Spearhead
     bloco_audio = f"""<!-- wp:audio {{"id":{audio_id}}} -->
 <figure class="wp-block-audio"><audio controls src="{audio_url}"></audio></figure>
 <!-- /wp:audio -->"""
@@ -169,8 +174,8 @@ def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
     post_payload = {
         "title": f"Drops IA: {dados_episodio['titulo_episodio']}",
         "content": conteudo_post,
-        "status": "publish",  # Pode trocar por 'draft' se preferir revisar antes
-        "format": "audio"     # Formato de post 'audio' suportado pelo Spearhead
+        "status": "publish",
+        "format": "audio"
     }
 
     post_headers = {**headers_auth, "Content-Type": "application/json"}
