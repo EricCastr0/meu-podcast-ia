@@ -66,7 +66,7 @@ def obter_noticia_inedita():
 # 2. GERAÇÃO DO ROTEIRO (LLM - Roteiro de 1 min / 130-145 palavras)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
-    prompt = f"""
+  prompt = f"""
     Você é o roteirista de um mini podcast diário de 1 minuto sobre Inteligência Artificial chamado "Drops IA".
     Crie um bate-papo dinâmico e natural entre dois apresentadores: Alex e Bia.
 
@@ -88,18 +88,19 @@ def gerar_roteiro(noticia: dict) -> dict:
     }}
     """
 
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    
-    resp = requests.post(url, json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(raw_json)
+  headers = {"Content-Type": "application/json"}
+  payload = {
+      "contents": [{"parts": [{"text": prompt}]}],
+      "generationConfig": {"response_mime_type": "application/json"},
+  }
 
+  # Endpoint com o modelo oficial gemini-1.5-flash
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+  resp = requests.post(url, json=payload, headers=headers, timeout=30)
+  resp.raise_for_status()
+  raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+  return json.loads(raw_json)
 
 # ==============================================================================
 # 3. SÍNTESE DO ÁUDIO (Edge-TTS + Concatenação Pydub)
