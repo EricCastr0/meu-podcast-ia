@@ -7,23 +7,31 @@ import feedparser
 import requests
 import edge_tts
 import xmlrpc.client
+from urllib.parse import urlparse
 from pydub import AudioSegment
 
 # ==============================================================================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES (Variáveis de Ambiente / Secrets do GitHub)
 # ==============================================================================
-WP_URL = os.environ.get("WP_URL", "").rstrip("/")
-WP_USER = os.environ.get("WP_USER", "")
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+RAW_WP_URL = os.environ.get("WP_URL", "").strip()
+WP_USER = os.environ.get("WP_USER", "").strip()
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
-GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main")
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "").strip()
+GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main").strip()
 
-VOICE_A = "pt-BR-AntonioNeural"    # Alex
-VOICE_B = "pt-BR-FranciscaNeural"  # Bia
+# Garante a URL raiz do WordPress (remove subpastas como /podcasts caso tenham sido incluídas)
+if RAW_WP_URL:
+    parsed_wp = urlparse(RAW_WP_URL)
+    WP_URL = f"{parsed_wp.scheme}://{parsed_wp.netloc}"
+else:
+    WP_URL = ""
 
-# Feeds de notícias de IA (com fallbacks de tecnologia)
+VOICE_A = "pt-BR-AntonioNeural"    # Alex (Apresentador 1)
+VOICE_B = "pt-BR-FranciscaNeural"  # Bia (Apresentadora 2)
+
+# Feeds de notícias de IA e tecnologia em português
 FEEDS_RSS = [
     "https://news.google.com/rss/search?q=inteligencia+artificial+when:2d&hl=pt-BR&gl=BR&ceid=BR:pt-419",
     "https://olhardigital.com.br/editorias/inteligencia-artificial/feed/",
@@ -37,7 +45,7 @@ HEADERS_BROWSER = {
 
 
 # ==============================================================================
-# 1. BUSCA DE NOTÍCIAS (Com User-Agent e Múltiplas Fontes)
+# 1. BUSCA DE NOTÍCIAS E VERIFICAÇÃO DE DUPLICIDADE
 # ==============================================================================
 def obter_noticia_inedita():
     titulos_recentes = []
@@ -62,7 +70,7 @@ def obter_noticia_inedita():
 
             for entry in feed.entries[:10]:
                 titulo_limpo = entry.title.split(" - ")[0].strip()
-                # Ignora se já estiver no blog
+                # Evita republicar tópicos já existentes
                 if not any(titulo_limpo.lower() in t for t in titulos_recentes):
                     resumo = entry.summary if hasattr(entry, "summary") else titulo_limpo
                     return {
@@ -77,7 +85,7 @@ def obter_noticia_inedita():
 
 
 # ==============================================================================
-# 2. GERAÇÃO DO ROTEIRO (Com Retry e Fallback para 503)
+# 2. GERAÇÃO DO ROTEIRO (LLM com Retry e Fallback para 503)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
     prompt = f"""
@@ -140,7 +148,7 @@ def gerar_roteiro(noticia: dict) -> dict:
 
 
 # ==============================================================================
-# 3. SÍNTESE DO ÁUDIO (Edge-TTS)
+# 3. SÍNTESE DO ÁUDIO (Edge-TTS + Concatenação Pydub)
 # ==============================================================================
 async def sintetizar_dialogo(dialogo: list, arquivo_saida: str):
     temp_files = []
@@ -168,10 +176,10 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida: str):
 # ==============================================================================
 def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
     endpoint = f"{WP_URL}/xmlrpc.php"
-    print(f"Conectando ao WordPress.com via XML-RPC: {endpoint}...")
+    print(f"Conectando ao WordPress.com via XML-RPC em: {endpoint}...")
     server = xmlrpc.client.ServerProxy(endpoint)
 
-    # Bloco Gutenberg nativo de áudio para o Spearhead
+    # Bloco Gutenberg nativo para o tema Spearhead com o link público da CDN
     bloco_audio = f"""<!-- wp:audio -->
 <figure class="wp-block-audio"><audio controls src="{audio_url}"></audio></figure>
 <!-- /wp:audio -->"""
@@ -192,7 +200,8 @@ def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
         "post_status": "publish",
         "post_format": "audio",
         "terms_names": {
-            "category": ["Podcasts", "Inteligência Artificial"]
+            "category": ["Podcasts", "Inteligência Artificial"],
+            "post_tag": ["IA", "Tecnologia", "Drops IA"]
         }
     }
 
@@ -207,6 +216,8 @@ def main():
     if not all([WP_URL, WP_USER, WP_APP_PASSWORD, GEMINI_API_KEY]):
         print("Erro: Variáveis de ambiente obrigatórias ausentes.")
         sys.exit(1)
+
+    print(f"Site configurado: {WP_URL}")
 
     print("Etapa 1: Buscando notícias inéditas...")
     noticia = obter_noticia_inedita()
@@ -227,13 +238,13 @@ def main():
     asyncio.run(sintetizar_dialogo(dados["dialogo"], caminho_audio))
     print(f"Áudio gerado com sucesso em: {caminho_audio}")
 
-    # Monta a URL pública do áudio no repositório GitHub
+    # Monta a URL pública para o player (via CDN jsDelivr com o repositório do GitHub)
     audio_cdn_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_REF_NAME}/audios/{nome_audio}"
     print(f"URL pública do áudio: {audio_cdn_url}")
 
     print("Etapa 4: Publicando no WordPress.com...")
     post_id = publicar_wordpress_com(dados, audio_cdn_url)
-    print(f"Sucesso! Post #{post_id} publicado no WordPress.com!")
+    print(f"Sucesso absoluto! Post #{post_id} publicado no WordPress.com!")
 
 
 if __name__ == "__main__":
