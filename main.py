@@ -155,36 +155,62 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida="episodio.mp3"):
 
 
 # ==============================================================================
-# 4. PUBLICAÇÃO NO WORDPRESS (Tema Spearhead)
+# 4. PUBLICAÇÃO NO WORDPRESS (Com detecção automática de rota da REST API)
 # ==============================================================================
+def obter_base_api_wp():
+  """Verifica se o servidor responde em /wp-json/ ou pelo fallback ?rest_route=."""
+  headers = get_wp_auth_header()
+  url_padrao = f"{WP_URL}/wp-json/wp/v2"
+
+  try:
+    r = requests.get(f"{url_padrao}/types", headers=headers, timeout=10)
+    if r.status_code == 200:
+      return url_padrao, False  # Rota padrão com pretty permalinks
+  except Exception:
+    pass
+
+  # Fallback caso os links permanentes estejam no modo simples
+  print(
+      "Aviso: /wp-json/ retornou erro ou 404. Usando rota de contingência"
+      " ?rest_route=/wp/v2..."
+  )
+  return f"{WP_URL}/index.php?rest_route=/wp/v2", True
+
+
 def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
-    headers_auth = get_wp_auth_header()
+  headers_auth = get_wp_auth_header()
+  api_base, is_fallback = obter_base_api_wp()
 
-    # 4.1. Upload do Arquivo de Áudio
-    nome_arquivo = f"drops_ia_{os.path.basename(caminho_audio)}"
-    with open(caminho_audio, "rb") as f:
-        media_headers = {
-            **headers_auth,
-            "Content-Disposition": f'attachment; filename="{nome_arquivo}"',
-            "Content-Type": "audio/mpeg"
-        }
-        media_resp = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/media",
-            headers=media_headers,
-            data=f,
-            timeout=60
-        )
-        media_resp.raise_for_status()
-        media_data = media_resp.json()
-        audio_id = media_data["id"]
-        audio_url = media_data["source_url"]
+  # 4.1. Upload do Arquivo de Áudio
+  endpoint_media = f"{api_base}&media" if is_fallback else f"{api_base}/media"
+  if is_fallback:
+    endpoint_media = f"{WP_URL}/index.php?rest_route=/wp/v2/media"
 
-    # 4.2. Estrutura de Blocos do Gutenberg para o Spearhead
-    bloco_audio = f"""<!-- wp:audio {{"id":{audio_id}}} -->
+  nome_arquivo = f"drops_ia_{os.path.basename(caminho_audio)}"
+  with open(caminho_audio, "rb") as f:
+    media_headers = {
+        **headers_auth,
+        "Content-Disposition": f'attachment; filename="{nome_arquivo}"',
+        "Content-Type": "audio/mpeg",
+    }
+    media_resp = requests.post(
+        endpoint_media, headers=media_headers, data=f, timeout=60
+    )
+    if not media_resp.ok:
+      print(f"Erro no upload da mídia ({media_resp.status_code}):")
+      print(media_resp.text)
+      media_resp.raise_for_status()
+
+    media_data = media_resp.json()
+    audio_id = media_data["id"]
+    audio_url = media_data["source_url"]
+
+  # 4.2. Estrutura de Blocos do Gutenberg para o Spearhead
+  bloco_audio = f"""<!-- wp:audio {{"id":{audio_id}}} -->
 <figure class="wp-block-audio"><audio controls src="{audio_url}"></audio></figure>
 <!-- /wp:audio -->"""
 
-    bloco_texto = f"""<!-- wp:heading {{"level":3}} -->
+  bloco_texto = f"""<!-- wp:heading {{"level":3}} -->
 <h3 class="wp-block-heading">Notas do Episódio</h3>
 <!-- /wp:heading -->
 
@@ -192,24 +218,31 @@ def publicar_wordpress(dados_episodio: dict, caminho_audio: str):
 <p>{dados_episodio['resumo_texto']}</p>
 <!-- /wp:paragraph -->"""
 
-    conteudo_post = f"{bloco_audio}\n\n{bloco_texto}"
+  conteudo_post = f"{bloco_audio}\n\n{bloco_texto}"
 
-    post_payload = {
-        "title": f"Drops IA: {dados_episodio['titulo_episodio']}",
-        "content": conteudo_post,
-        "status": "publish",
-        "format": "audio"
-    }
+  post_payload = {
+      "title": f"Drops IA: {dados_episodio['titulo_episodio']}",
+      "content": conteudo_post,
+      "status": "publish",
+      "format": "audio",
+  }
 
-    post_headers = {**headers_auth, "Content-Type": "application/json"}
-    post_resp = requests.post(
-        f"{WP_URL}/wp-json/wp/v2/posts",
-        headers=post_headers,
-        json=post_payload,
-        timeout=30
-    )
+  endpoint_posts = (
+      f"{WP_URL}/index.php?rest_route=/wp/v2/posts"
+      if is_fallback
+      else f"{api_base}/posts"
+  )
+  post_headers = {**headers_auth, "Content-Type": "application/json"}
+
+  post_resp = requests.post(
+      endpoint_posts, headers=post_headers, json=post_payload, timeout=30
+  )
+  if not post_resp.ok:
+    print(f"Erro ao criar o post ({post_resp.status_code}):")
+    print(post_resp.text)
     post_resp.raise_for_status()
-    return post_resp.json()
+
+  return post_resp.json()
 
 
 # ==============================================================================
