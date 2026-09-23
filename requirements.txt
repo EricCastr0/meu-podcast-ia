@@ -1,0 +1,4 @@
+requests>=2.31.0
+feedparser>=6.0.10
+edge-tts>=6.1.10
+pydub>=0.25.1
