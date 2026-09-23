@@ -23,37 +23,56 @@ GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main")
 VOICE_A = "pt-BR-AntonioNeural"    # Alex
 VOICE_B = "pt-BR-FranciscaNeural"  # Bia
 
-RSS_FEED_URL = "https://news.google.com/rss/search?q=inteligencia+artificial+when:1d&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+# Feeds de notícias de IA (com fallbacks de tecnologia)
+FEEDS_RSS = [
+    "https://news.google.com/rss/search?q=inteligencia+artificial+when:2d&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+    "https://olhardigital.com.br/editorias/inteligencia-artificial/feed/",
+    "https://canaltech.com.br/rss/",
+    "https://rss.tecmundo.com.br/feed"
+]
+
+HEADERS_BROWSER = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
 
 
 # ==============================================================================
-# 1. BUSCA DE NOTÍCIAS E VERIFICAÇÃO VIA RSS DO BLOG
+# 1. BUSCA DE NOTÍCIAS (Com User-Agent e Múltiplas Fontes)
 # ==============================================================================
 def obter_noticia_inedita():
-    feed = feedparser.parse(RSS_FEED_URL)
-    if not feed.entries:
-        print("Nenhuma notícia encontrada no feed RSS.")
-        return None
-
     titulos_recentes = []
     try:
-        # Lê o feed público do seu próprio blog no WordPress.com
-        blog_feed = feedparser.parse(f"{WP_URL}/feed/")
-        if blog_feed.entries:
-            titulos_recentes = [e.title.lower() for e in blog_feed.entries[:10]]
+        r_blog = requests.get(f"{WP_URL}/feed/", headers=HEADERS_BROWSER, timeout=10)
+        if r_blog.ok:
+            blog_feed = feedparser.parse(r_blog.content)
+            titulos_recentes = [e.title.lower() for e in blog_feed.entries[:15]]
+            print(f"Títulos já existentes no blog: {len(titulos_recentes)}")
     except Exception as e:
         print(f"Aviso ao consultar feed do blog: {e}")
 
-    for entry in feed.entries[:8]:
-        titulo_limpo = entry.title.split(" - ")[0].strip()
-        if not any(titulo_limpo.lower() in t for t in titulos_recentes):
-            return {
-                "titulo": titulo_limpo,
-                "link": entry.link,
-                "resumo_fonte": entry.summary if hasattr(entry, "summary") else titulo_limpo
-            }
+    for url_feed in FEEDS_RSS:
+        try:
+            print(f"Consultando feed: {url_feed}...")
+            resp = requests.get(url_feed, headers=HEADERS_BROWSER, timeout=15)
+            if not resp.ok:
+                continue
 
-    print("Todas as notícias recentes já foram publicadas no blog.")
+            feed = feedparser.parse(resp.content)
+            print(f"Notícias encontradas no feed: {len(feed.entries)}")
+
+            for entry in feed.entries[:10]:
+                titulo_limpo = entry.title.split(" - ")[0].strip()
+                # Ignora se já estiver no blog
+                if not any(titulo_limpo.lower() in t for t in titulos_recentes):
+                    resumo = entry.summary if hasattr(entry, "summary") else titulo_limpo
+                    return {
+                        "titulo": titulo_limpo,
+                        "link": entry.link,
+                        "resumo_fonte": resumo
+                    }
+        except Exception as e:
+            print(f"Erro ao processar feed {url_feed}: {e}")
+
     return None
 
 
@@ -148,9 +167,11 @@ async def sintetizar_dialogo(dialogo: list, arquivo_saida: str):
 # 4. PUBLICAÇÃO NO WORDPRESS.COM VIA XML-RPC
 # ==============================================================================
 def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
-    server = xmlrpc.client.ServerProxy(f"{WP_URL}/xmlrpc.php")
+    endpoint = f"{WP_URL}/xmlrpc.php"
+    print(f"Conectando ao WordPress.com via XML-RPC: {endpoint}...")
+    server = xmlrpc.client.ServerProxy(endpoint)
 
-    # Bloco nativo de áudio para o Spearhead apontando para a CDN do GitHub
+    # Bloco Gutenberg nativo de áudio para o Spearhead
     bloco_audio = f"""<!-- wp:audio -->
 <figure class="wp-block-audio"><audio controls src="{audio_url}"></audio></figure>
 <!-- /wp:audio -->"""
@@ -175,8 +196,6 @@ def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
         }
     }
 
-    print("Enviando post via XML-RPC para o WordPress.com...")
-    # Chamada nativa aceita em todos os planos do WordPress.com
     post_id = server.wp.newPost(0, WP_USER, WP_APP_PASSWORD, post_data)
     return post_id
 
@@ -186,35 +205,35 @@ def publicar_wordpress_com(dados_episodio: dict, audio_url: str):
 # ==============================================================================
 def main():
     if not all([WP_URL, WP_USER, WP_APP_PASSWORD, GEMINI_API_KEY]):
-        print("Erro: Verifique as variáveis de ambiente (WP_URL, WP_USER, WP_APP_PASSWORD, GEMINI_API_KEY).")
+        print("Erro: Variáveis de ambiente obrigatórias ausentes.")
         sys.exit(1)
 
-    print("Etapa 1: Buscando notícias...")
+    print("Etapa 1: Buscando notícias inéditas...")
     noticia = obter_noticia_inedita()
     if not noticia:
-        print("Encerrando execução.")
-        return
+        print("Erro crítico: Nenhuma notícia pôde ser obtida dos feeds RSS.")
+        sys.exit(1)
 
     print(f"Notícia selecionada: {noticia['titulo']}")
 
-    print("Etapa 2: Gerando roteiro...")
+    print("Etapa 2: Gerando roteiro com IA...")
     dados = gerar_roteiro(noticia)
 
-    print("Etapa 3: Sintetizando áudio...")
+    print("Etapa 3: Sintetizando áudio com Edge-TTS...")
     os.makedirs("audios", exist_ok=True)
     nome_audio = f"episodio_{int(time.time())}.mp3"
     caminho_audio = os.path.join("audios", nome_audio)
 
     asyncio.run(sintetizar_dialogo(dados["dialogo"], caminho_audio))
-    print(f"Áudio gerado em: {caminho_audio}")
+    print(f"Áudio gerado com sucesso em: {caminho_audio}")
 
-    # Monta a URL pública via CDN do GitHub
+    # Monta a URL pública do áudio no repositório GitHub
     audio_cdn_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPOSITORY}@{GITHUB_REF_NAME}/audios/{nome_audio}"
     print(f"URL pública do áudio: {audio_cdn_url}")
 
     print("Etapa 4: Publicando no WordPress.com...")
     post_id = publicar_wordpress_com(dados, audio_cdn_url)
-    print(f"Sucesso! Post criado com ID #{post_id} no seu WordPress.com!")
+    print(f"Sucesso! Post #{post_id} publicado no WordPress.com!")
 
 
 if __name__ == "__main__":
