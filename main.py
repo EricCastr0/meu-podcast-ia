@@ -1,3 +1,4 @@
+import time
 import os
 import sys
 import json
@@ -59,7 +60,7 @@ def obter_noticia_inedita():
 
 
 # ==============================================================================
-# 2. GERAÇÃO DO ROTEIRO (LLM - Gemini 2.0 Flash)
+# 2. GERAÇÃO DO ROTEIRO (Com Retry e Fallback para Resiliência a 503)
 # ==============================================================================
 def gerar_roteiro(noticia: dict) -> dict:
   prompt = f"""
@@ -90,19 +91,44 @@ def gerar_roteiro(noticia: dict) -> dict:
       "generationConfig": {"response_mime_type": "application/json"},
   }
 
-  # Endpoint com o modelo oficial atual
-  url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+  # Lista de modelos por ordem de preferência
+  modelos_fallback = [
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+  ]
 
-  print(f"Enviando solicitação para: {url}")
-  resp = requests.post(url, json=payload, headers=headers, timeout=30)
+  for modelo in modelos_fallback:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent"
 
-  if not resp.ok:
-    print(f"Erro retornado pela API do Gemini ({resp.status_code}): {resp.text}")
-    resp.raise_for_status()
+    for tentativa in range(1, 4):
+      print(f"Tentativa {tentativa} usando modelo: {modelo}...")
+      try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=35)
 
-  raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-  return json.loads(raw_json)
+        if resp.status_code == 200:
+          raw_json = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+          return json.loads(raw_json)
 
+        # Se for sobrecarga temporária (503 ou 429), aguarda 5 segundos e tenta de novo
+        if resp.status_code in (503, 429):
+          print(
+              f"Modelo {modelo} com pico de demanda (HTTP"
+              f" {resp.status_code}). Aguardando 5s..."
+          )
+          time.sleep(5)
+        else:
+          print(f"Aviso ({resp.status_code}) no modelo {modelo}: {resp.text}")
+          break  # Se for outro erro, tenta o próximo modelo da lista
+
+      except Exception as e:
+        print(f"Falha de conexão com {modelo}: {e}")
+        time.sleep(3)
+
+  raise RuntimeError(
+      "Não foi possível gerar o roteiro: todos os modelos do Gemini falharam"
+      " ou estão em alta demanda no momento."
+  )
 
 # ==============================================================================
 # 3. SÍNTESE DO ÁUDIO (Edge-TTS)
